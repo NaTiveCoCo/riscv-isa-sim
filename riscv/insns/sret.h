@@ -1,4 +1,5 @@
 require_extension('S');
+require(!STATE.nacc_a);
 reg_t prev_hstatus = STATE.hstatus->read();
 if (STATE.v) {
   if (STATE.prv == PRV_U || get_field(prev_hstatus, HSTATUS_VTSR))
@@ -44,4 +45,8 @@ if (STATE.prv == PRV_S) {
 }
 
 STATE.sstatus->write(s);
+reg_t as = STATE.asstatus->read();
+STATE.nacc_a = get_field(as, NACC_ASSTATUS_SPA);
+as = set_field(as, NACC_ASSTATUS_SPA, 0);
+STATE.asstatus->write(as);
 p->set_privilege(prev_prv, prev_virt);

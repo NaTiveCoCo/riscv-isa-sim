@@ -62,10 +62,133 @@ reg_t mmu_t::translate(mem_access_info_t access_info, reg_t len)
   bool virt = access_info.effective_virt;
   reg_t mode = (reg_t) access_info.effective_priv;
 
+  const bool effective_a = nacc_effective_a(access_info);
+  if (effective_a && mode == PRV_U && ((addr >> 38) & 1))
+    throw_access_exception(virt, addr, type);
+
+  // A world 的地址空间前置条件不以 bitmap range 已配置为可选开关；未配置
+  // bitmap 或 Bare satp 都无法证明 live root 是 ROOT_L0，必须 fail closed。
+  if (effective_a && mode <= PRV_S) {
+    const reg_t satp = proc->state.satp->readvirt(virt);
+    if (get_field(satp, SATP64_MODE) == SATP_MODE_OFF)
+      throw_access_exception(virt, addr, type);
+    const reg_t root_paddr = get_field(satp, SATP64_PPN) << PGSHIFT;
+    if (nacc_bitmap_tag(root_paddr, access_info) != 1)
+      throw_access_exception(virt, addr, type);
+  }
+
   reg_t paddr = walk(access_info) | (addr & (PGSIZE-1));
   if (!pmp_ok(paddr, len, access_info.flags.ss_access ? STORE : type, mode, access_info.flags.hlvx))
     throw_access_exception(virt, addr, access_info.flags.ss_access ? STORE : type);
+  nacc_check_access(access_info, paddr, len);
   return paddr;
+}
+
+bool mmu_t::nacc_configured() const
+{
+  return proc && proc->state.bitmap_target_end &&
+         proc->state.bitmap_target_end->read() > proc->state.bitmap_target_start->read();
+}
+
+bool mmu_t::nacc_effective_a(const mem_access_info_t& access_info) const
+{
+  if (access_info.type != FETCH && proc->state.prv == PRV_M &&
+      get_field(proc->state.mstatus->read(), MSTATUS_MPRV) &&
+      access_info.effective_priv != PRV_M)
+    return get_field(proc->state.asstatus->read(), NACC_ASSTATUS_MPA);
+  return proc->state.nacc_a;
+}
+
+uint8_t mmu_t::nacc_bitmap_tag(reg_t paddr, const mem_access_info_t& access_info)
+{
+  const reg_t start = proc->state.bitmap_target_start->read();
+  const reg_t end = proc->state.bitmap_target_end->read();
+  const reg_t storage = proc->state.bitmap_storage_base->read();
+  if ((start & (PGSIZE - 1)) || (end & (PGSIZE - 1)) || end <= start)
+    throw_access_exception(access_info.effective_virt, access_info.transformed_vaddr, access_info.type);
+  if (paddr < start || paddr >= end)
+    return 0;
+
+  const reg_t page_index = (paddr - start) >> PGSHIFT;
+  const reg_t bitmap_addr = storage + (page_index >> 2);
+  if (!pmp_ok(bitmap_addr, 1, LOAD, PRV_M, false))
+    throw_access_exception(access_info.effective_virt, access_info.transformed_vaddr, access_info.type);
+  uint8_t byte = 0;
+  void* host_addr = sim->addr_to_mem(bitmap_addr);
+  if (host_addr)
+    memcpy(&byte, host_addr, 1);
+  else if (!mmio_load(bitmap_addr, 1, &byte))
+    throw_access_exception(access_info.effective_virt, access_info.transformed_vaddr, access_info.type);
+  return (byte >> ((page_index & 3) * 2)) & 3;
+}
+
+void mmu_t::nacc_check_access(const mem_access_info_t& access_info, reg_t paddr, reg_t len)
+{
+  if (!nacc_configured())
+    return;
+
+  const reg_t mode = access_info.effective_priv;
+  const bool effective_a = nacc_effective_a(access_info);
+  const reg_t access_end = paddr + len;
+  if (access_end < paddr)
+    throw_access_exception(access_info.effective_virt, access_info.transformed_vaddr, access_info.type);
+
+  const reg_t agent_start = proc->state.sagent->read();
+  const reg_t agent_end = proc->state.eagent->read();
+  if (agent_end > agent_start && paddr < agent_end && access_end > agent_start &&
+      !(mode == PRV_M || (effective_a && mode == PRV_S)))
+    throw_access_exception(access_info.effective_virt, access_info.transformed_vaddr, access_info.type);
+
+  const reg_t target_start = proc->state.bitmap_target_start->read();
+  const reg_t target_end = proc->state.bitmap_target_end->read();
+  const reg_t page_count = (target_end - target_start) >> PGSHIFT;
+  const reg_t bitmap_bytes = (page_count + 3) >> 2;
+  const reg_t storage_start = proc->state.bitmap_storage_base->read();
+  const reg_t storage_end = storage_start + bitmap_bytes;
+  if (storage_end < storage_start)
+    throw_access_exception(access_info.effective_virt, access_info.transformed_vaddr, access_info.type);
+  if (paddr < storage_end && access_end > storage_start &&
+      (access_info.type == FETCH || !(mode == PRV_M || (effective_a && mode == PRV_S))))
+    throw_access_exception(access_info.effective_virt, access_info.transformed_vaddr, access_info.type);
+
+  const uint8_t tag = nacc_bitmap_tag(paddr, access_info);
+  bool allowed = false;
+  switch (tag) {
+    case 0: // NORMAL
+      allowed = true;
+      break;
+    case 1: { // ROOT_L0
+      if (mode == PRV_M)
+        allowed = true;
+      else if (access_info.type == FETCH)
+        allowed = false;
+      else if (effective_a && mode == PRV_S)
+        allowed = true;
+      else {
+        const reg_t satp = proc->state.satp->readvirt(access_info.effective_virt);
+        const reg_t root_ppn = get_field(satp, SATP64_PPN);
+        const bool current_root = (paddr >> PGSHIFT) == root_ppn;
+        if (access_info.type == LOAD)
+          allowed = current_root;
+        else
+          allowed = !effective_a && mode == PRV_S && current_root &&
+                    (paddr & (PGSIZE - 1)) >= PGSIZE / 2 &&
+                    ((paddr & (PGSIZE - 1)) + len) <= PGSIZE;
+      }
+      break;
+    }
+    case 2: // PRIVATE_DATA
+      allowed = mode == PRV_M || effective_a;
+      break;
+    case 3: // PRIVATE_COPY_PENDING
+      allowed = mode == PRV_M ||
+                (access_info.type != FETCH && effective_a && mode == PRV_S);
+      break;
+    default:
+      abort();
+  }
+  if (!allowed)
+    throw_access_exception(access_info.effective_virt, access_info.transformed_vaddr, access_info.type);
 }
 
 inline mmu_t::insn_parcel_t mmu_t::perform_intrapage_fetch(reg_t vaddr, uintptr_t host_addr, reg_t paddr)
@@ -391,7 +514,8 @@ tlb_entry_t mmu_t::refill_tlb(reg_t vaddr, reg_t paddr, char* host_addr, access_
 
   tlb_entry_t entry = {uintptr_t(host_addr) - (vaddr % PGSIZE), paddr - (vaddr % PGSIZE)};
 
-  if (in_mprv()
+  if (nacc_configured()
+      || in_mprv()
       || !pmp_homogeneous(base_paddr, PGSIZE)
       || (proc && proc->get_log_commits_enabled()))
     return entry;

@@ -906,6 +906,7 @@ riscv_insn_priv = \
 	ebreak \
 	ecall \
 	mret \
+	asret \
 	sfence_vma \
 	sret \
 	wfi \
