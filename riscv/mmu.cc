@@ -62,6 +62,11 @@ reg_t mmu_t::translate(mem_access_info_t access_info, reg_t len)
   bool virt = access_info.effective_virt;
   reg_t mode = (reg_t) access_info.effective_priv;
 
+  // RTL 在 translation/PMP 之前让 sticky fatal 优先拒绝所有 S/U-effective 请求。
+  // M-effective 访问是 reset 前诊断和恢复所需的可信兜底。
+  if (proc->state.nacc_bitmap_fatal && mode != PRV_M)
+    throw_access_exception(virt, addr, type);
+
   const bool effective_a = nacc_effective_a(access_info);
   if (effective_a && mode == PRV_U && ((addr >> 38) & 1))
     throw_access_exception(virt, addr, type);
@@ -86,6 +91,12 @@ reg_t mmu_t::translate(mem_access_info_t access_info, reg_t len)
 
 bool mmu_t::nacc_configured() const
 {
+  return proc && (proc->state.nacc_bitmap_fatal || nacc_bitmap_configured() ||
+         (proc->state.eagent && proc->state.eagent->read() > proc->state.sagent->read()));
+}
+
+bool mmu_t::nacc_bitmap_configured() const
+{
   return proc && proc->state.bitmap_target_end &&
          proc->state.bitmap_target_end->read() > proc->state.bitmap_target_start->read();
 }
@@ -101,32 +112,57 @@ bool mmu_t::nacc_effective_a(const mem_access_info_t& access_info) const
 
 uint8_t mmu_t::nacc_bitmap_tag(reg_t paddr, const mem_access_info_t& access_info)
 {
+  if (proc->state.nacc_bitmap_fatal)
+    throw_access_exception(access_info.effective_virt, access_info.transformed_vaddr, access_info.type);
+
   const reg_t start = proc->state.bitmap_target_start->read();
   const reg_t end = proc->state.bitmap_target_end->read();
   const reg_t storage = proc->state.bitmap_storage_base->read();
+  // 没有有序 target range 时不存在 metadata request；A-world root gate 只应得到
+  // 普通 access fault，不能把未配置状态升级为 reset-only fatal。
   if ((start & (PGSIZE - 1)) || (end & (PGSIZE - 1)) || end <= start)
     throw_access_exception(access_info.effective_virt, access_info.transformed_vaddr, access_info.type);
   if (paddr < start || paddr >= end)
     return 0;
 
   const reg_t page_index = (paddr - start) >> PGSHIFT;
+  const reg_t page_count = (end - start) >> PGSHIFT;
+  const reg_t bitmap_bytes = (page_count + 3) >> 2;
   const reg_t bitmap_addr = storage + (page_index >> 2);
-  if (!pmp_ok(bitmap_addr, 1, LOAD, PRV_M, false))
+  const reg_t bitmap_end = storage + bitmap_bytes;
+  const unsigned paddr_bits = proc->paddr_bits();
+  const auto fits_paddr = [paddr_bits](reg_t value) {
+    return paddr_bits >= sizeof(reg_t) * 8 || (value >> paddr_bits) == 0;
+  };
+  const reg_t agent_start = proc->state.sagent->read();
+  const reg_t agent_end = proc->state.eagent->read();
+  const bool lookup_in_agent = agent_end > agent_start && paddr >= agent_start && paddr < agent_end;
+  if (page_count > ~reg_t(0) - 3 || bitmap_end < storage || bitmap_addr < storage ||
+      bitmap_addr >= bitmap_end || !fits_paddr(start) ||
+      (paddr_bits < sizeof(reg_t) * 8 && end > (reg_t(1) << paddr_bits)) ||
+      !fits_paddr(storage) || !fits_paddr(bitmap_addr) ||
+      (paddr_bits < sizeof(reg_t) * 8 && bitmap_end > (reg_t(1) << paddr_bits)) ||
+      lookup_in_agent) {
+    proc->state.nacc_bitmap_fatal = true;
     throw_access_exception(access_info.effective_virt, access_info.transformed_vaddr, access_info.type);
+  }
+  if (!pmp_ok(bitmap_addr, 1, LOAD, PRV_M, false)) {
+    proc->state.nacc_bitmap_fatal = true;
+    throw_access_exception(access_info.effective_virt, access_info.transformed_vaddr, access_info.type);
+  }
   uint8_t byte = 0;
   void* host_addr = sim->addr_to_mem(bitmap_addr);
   if (host_addr)
     memcpy(&byte, host_addr, 1);
-  else if (!mmio_load(bitmap_addr, 1, &byte))
+  else if (!mmio_load(bitmap_addr, 1, &byte)) {
+    proc->state.nacc_bitmap_fatal = true;
     throw_access_exception(access_info.effective_virt, access_info.transformed_vaddr, access_info.type);
+  }
   return (byte >> ((page_index & 3) * 2)) & 3;
 }
 
 void mmu_t::nacc_check_access(const mem_access_info_t& access_info, reg_t paddr, reg_t len)
 {
-  if (!nacc_configured())
-    return;
-
   const reg_t mode = access_info.effective_priv;
   const bool effective_a = nacc_effective_a(access_info);
   const reg_t access_end = paddr + len;
@@ -139,6 +175,10 @@ void mmu_t::nacc_check_access(const mem_access_info_t& access_info, reg_t paddr,
       !(mode == PRV_M || (effective_a && mode == PRV_S)))
     throw_access_exception(access_info.effective_virt, access_info.transformed_vaddr, access_info.type);
 
+  // Agent region 是独立物理区间，不以 bitmap target 是否配置为开关。
+  if (!nacc_bitmap_configured())
+    return;
+
   const reg_t target_start = proc->state.bitmap_target_start->read();
   const reg_t target_end = proc->state.bitmap_target_end->read();
   const reg_t page_count = (target_end - target_start) >> PGSHIFT;
@@ -149,6 +189,14 @@ void mmu_t::nacc_check_access(const mem_access_info_t& access_info, reg_t paddr,
     throw_access_exception(access_info.effective_virt, access_info.transformed_vaddr, access_info.type);
   if (paddr < storage_end && access_end > storage_start &&
       (access_info.type == FETCH || !(mode == PRV_M || (effective_a && mode == PRV_S))))
+    throw_access_exception(access_info.effective_virt, access_info.transformed_vaddr, access_info.type);
+
+  // M-effective data access 是可信兜底，不读取 bitmap metadata；PMP 与 backing fetch
+  // 禁令已经分别在 translate() 和上面的区间检查中执行。
+  if (mode == PRV_M)
+    return;
+
+  if (proc->state.nacc_bitmap_fatal)
     throw_access_exception(access_info.effective_virt, access_info.transformed_vaddr, access_info.type);
 
   const uint8_t tag = nacc_bitmap_tag(paddr, access_info);
@@ -167,7 +215,8 @@ void mmu_t::nacc_check_access(const mem_access_info_t& access_info, reg_t paddr,
       else {
         const reg_t satp = proc->state.satp->readvirt(access_info.effective_virt);
         const reg_t root_ppn = get_field(satp, SATP64_PPN);
-        const bool current_root = (paddr >> PGSHIFT) == root_ppn;
+        const bool translation_enabled = get_field(satp, SATP64_MODE) != SATP_MODE_OFF;
+        const bool current_root = translation_enabled && (paddr >> PGSHIFT) == root_ppn;
         if (access_info.type == LOAD)
           allowed = current_root;
         else

@@ -108,6 +108,7 @@ void state_t::reset(processor_t* const proc, reg_t max_isa)
 
   prv = prev_prv = PRV_M;
   nacc_a = false;
+  nacc_bitmap_fatal = false;
   v = prev_v = false;
   prv_changed = false;
   v_changed = false;

@@ -6,6 +6,8 @@ set_pc_and_serialize(next_pc);
 
 reg_t as = STATE.asstatus->read();
 reg_t prev_prv = get_field(as, NACC_ASSTATUS_ASPP);
+if (prev_prv < PRV_M)
+  STATE.mstatus->write(set_field(STATE.mstatus->read(), MSTATUS_MPRV, 0));
 STATE.nacc_a = get_field(as, NACC_ASSTATUS_ASPA);
 as = set_field(as, NACC_ASSTATUS_ASIE, get_field(as, NACC_ASSTATUS_ASPIE));
 as = set_field(as, NACC_ASSTATUS_ASPIE, 1);

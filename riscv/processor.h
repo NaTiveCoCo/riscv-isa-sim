@@ -82,6 +82,7 @@ struct state_t
   std::unordered_map<reg_t, csr_t_p> csrmap;
   reg_t prv;    // TODO: Can this be an enum instead?
   bool nacc_a;  // hidden A world state；软件不能把它作为 CSR bit 访问
+  bool nacc_bitmap_fatal;  // bitmap metadata 失败后只由 reset 清除的 sticky 状态
   reg_t prev_prv;
   bool prv_changed;
   bool v_changed;

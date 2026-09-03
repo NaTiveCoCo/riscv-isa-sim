@@ -77,14 +77,20 @@ void state_t::csr_init(processor_t* const proc, reg_t max_isa)
   add_csr(CSR_ASIP, asip);
   add_csr(CSR_ASIE, std::make_shared<nacc_asie_csr_t>(proc, CSR_ASIE, asie));
 
-  add_csr(CSR_SAGENT, sagent = std::make_shared<basic_csr_t>(proc, CSR_SAGENT, 0));
-  add_csr(CSR_EAGENT, eagent = std::make_shared<basic_csr_t>(proc, CSR_EAGENT, 0));
+  const reg_t nacc_page_address_mask = ~reg_t(0xfff);
+  add_csr(CSR_SAGENT,
+          sagent = std::make_shared<masked_csr_t>(proc, CSR_SAGENT, nacc_page_address_mask, 0));
+  add_csr(CSR_EAGENT,
+          eagent = std::make_shared<masked_csr_t>(proc, CSR_EAGENT, nacc_page_address_mask, 0));
   add_csr(CSR_BITMAPSTORAGEBASE,
-          bitmap_storage_base = std::make_shared<basic_csr_t>(proc, CSR_BITMAPSTORAGEBASE, 0));
+          bitmap_storage_base = std::make_shared<masked_csr_t>(proc, CSR_BITMAPSTORAGEBASE,
+                                                               nacc_page_address_mask, 0));
   add_csr(CSR_TARGETSTART,
-          bitmap_target_start = std::make_shared<basic_csr_t>(proc, CSR_TARGETSTART, 0));
+          bitmap_target_start = std::make_shared<masked_csr_t>(proc, CSR_TARGETSTART,
+                                                               nacc_page_address_mask, 0));
   add_csr(CSR_TARGETEND,
-          bitmap_target_end = std::make_shared<basic_csr_t>(proc, CSR_TARGETEND, 0));
+          bitmap_target_end = std::make_shared<masked_csr_t>(proc, CSR_TARGETEND,
+                                                             nacc_page_address_mask, 0));
 
   const reg_t minstretcfg_mask = !proc->extension_enabled_const(EXT_SMCNTRPMF) ? 0 :
     MHPMEVENT_MINH | MHPMEVENT_SINH | MHPMEVENT_UINH | MHPMEVENT_VSINH | MHPMEVENT_VUINH;
