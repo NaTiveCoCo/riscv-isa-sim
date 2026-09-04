@@ -1,0 +1,10 @@
+spikedevices_subproject_deps = \
+
+spikedevices_srcs = \
+	iceblk.cc \
+	iceblk_image.cc \
+
+spikedevices_test_srcs = \
+	iceblk_image.t.cc \
+
+spikedevices_install_shared_lib = yes
