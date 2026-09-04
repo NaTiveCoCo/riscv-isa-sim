@@ -19,6 +19,10 @@ if (prev_prv == PRV_U || (prev_virt && prev_prv != PRV_M))
 if (prev_virt && prev_prv == PRV_U)
   STATE.vsstatus->write(STATE.vsstatus->read() & ~SSTATUS_SDT);
 STATE.mstatus->write(s);
+reg_t as = STATE.asstatus->read();
+STATE.nacc_a = prev_prv == PRV_M ? false : get_field(as, NACC_ASSTATUS_MPA);
+as = set_field(as, NACC_ASSTATUS_MPA, 0);
+STATE.asstatus->write(as);
 if (STATE.mstatush) STATE.mstatush->write(s >> 32); // log mstatush change
 if (STATE.tcontrol) STATE.tcontrol->write((STATE.tcontrol->read() & CSR_TCONTROL_MPTE) ? (CSR_TCONTROL_MPTE | CSR_TCONTROL_MTE) : 0);
 p->set_privilege(prev_prv, prev_virt);

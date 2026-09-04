@@ -86,6 +86,11 @@ class mmu_t
 private:
   reg_t get_pmlen(bool effective_virt, reg_t effective_priv, xlate_flags_t flags) const;
   mem_access_info_t generate_access_info(reg_t addr, access_type type, xlate_flags_t xlate_flags);
+  bool nacc_configured() const;
+  bool nacc_bitmap_configured() const;
+  bool nacc_effective_a(const mem_access_info_t& access_info) const;
+  uint8_t nacc_bitmap_tag(reg_t paddr, const mem_access_info_t& access_info);
+  void nacc_check_access(const mem_access_info_t& access_info, reg_t paddr, reg_t len);
 
 public:
   mmu_t(simif_t* sim, endianness_t endianness, processor_t* proc, reg_t cache_blocksz);
@@ -97,7 +102,7 @@ public:
     bool aligned = (addr & (sizeof(T) - 1)) == 0;
     auto [tlb_hit, host_addr, _] = access_tlb(tlb_load, addr);
 
-    if (likely(!xlate_flags.is_special_access() && aligned && tlb_hit)) {
+    if (likely(!nacc_configured() && !xlate_flags.is_special_access() && aligned && tlb_hit)) {
       res = *(target_endian<T>*)host_addr;
     } else {
       load_slow_path(addr, sizeof(T), (uint8_t*)&res, xlate_flags);
@@ -137,7 +142,7 @@ public:
     bool aligned = (addr & (sizeof(T) - 1)) == 0;
     auto [tlb_hit, host_addr, _] = access_tlb(tlb_store, addr);
 
-    if (!xlate_flags.is_special_access() && likely(aligned && tlb_hit)) {
+    if (!nacc_configured() && !xlate_flags.is_special_access() && likely(aligned && tlb_hit)) {
       *(target_endian<T>*)host_addr = to_target(val);
     } else {
       target_endian<T> target_val = to_target(val);
@@ -497,7 +502,7 @@ private:
   }
 
   inline insn_parcel_t fetch_insn_parcel(reg_t addr) {
-    if (auto [tlb_hit, host_addr, paddr] = access_tlb(tlb_insn, addr); tlb_hit)
+    if (auto [tlb_hit, host_addr, paddr] = access_tlb(tlb_insn, addr); !nacc_configured() && tlb_hit)
       return from_le(*(insn_parcel_t*)host_addr);
 
     return from_le(fetch_slow_path(addr));

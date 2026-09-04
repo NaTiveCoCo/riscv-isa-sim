@@ -1040,6 +1040,83 @@ bool masked_csr_t::unlogged_write(const reg_t val) noexcept {
   return basic_csr_t::unlogged_write((read() & ~mask) | (val & mask));
 }
 
+nacc_a_csr_t::nacc_a_csr_t(processor_t* const proc, const reg_t addr, csr_t_p backing):
+  csr_t(proc, addr), backing(backing) {
+}
+
+void nacc_a_csr_t::verify_permissions(insn_t insn, bool write) const {
+  csr_t::verify_permissions(insn, write);
+  if (state->prv != PRV_M && !(state->nacc_a && state->prv == PRV_S))
+    throw trap_illegal_instruction(insn.bits());
+}
+
+reg_t nacc_a_csr_t::read() const noexcept {
+  return backing->read();
+}
+
+bool nacc_a_csr_t::unlogged_write(const reg_t val) noexcept {
+  backing->write(val);
+  return false;
+}
+
+nacc_status_csr_t::nacc_status_csr_t(processor_t* const proc, const reg_t addr, csr_t_p backing):
+  nacc_a_csr_t(proc, addr, backing) {
+}
+
+void nacc_status_csr_t::verify_permissions(insn_t insn, bool write) const {
+  if (state->prv != PRV_M && state->prv != PRV_S)
+    throw trap_illegal_instruction(insn.bits());
+  if (state->v)
+    throw trap_virtual_instruction(insn.bits());
+}
+
+reg_t nacc_status_csr_t::visible_mask() const noexcept {
+  if (state->prv == PRV_M)
+    return NACC_ASSTATUS_MASK;
+  if (state->nacc_a)
+    return NACC_ASSTATUS_ASPA | NACC_ASSTATUS_ASPP |
+           NACC_ASSTATUS_ASPIE | NACC_ASSTATUS_ASIE;
+  return NACC_ASSTATUS_SPA;
+}
+
+reg_t nacc_status_csr_t::read() const noexcept {
+  return backing->read() & visible_mask();
+}
+
+bool nacc_status_csr_t::unlogged_write(const reg_t val) noexcept {
+  const reg_t mask = visible_mask();
+  backing->write((backing->read() & ~mask) | (val & mask));
+  return false;
+}
+
+nacc_asip_csr_t::nacc_asip_csr_t(processor_t* const proc, const reg_t addr):
+  nacc_a_csr_t(proc, addr, nullptr) {
+}
+
+reg_t nacc_asip_csr_t::read() const noexcept {
+  return state->mip->read() & state->aideleg->read();
+}
+
+bool nacc_asip_csr_t::unlogged_write(const reg_t val) noexcept {
+  const reg_t mask = MIP_SSIP & state->aideleg->read();
+  state->mip->write((state->mip->read() & ~mask) | (val & mask));
+  return false;
+}
+
+nacc_asie_csr_t::nacc_asie_csr_t(processor_t* const proc, const reg_t addr, csr_t_p backing):
+  nacc_a_csr_t(proc, addr, backing) {
+}
+
+reg_t nacc_asie_csr_t::read() const noexcept {
+  return backing->read() & state->aideleg->read();
+}
+
+bool nacc_asie_csr_t::unlogged_write(const reg_t val) noexcept {
+  const reg_t mask = state->aideleg->read();
+  backing->write((backing->read() & ~mask) | (val & mask));
+  return false;
+}
+
 envcfg_csr_t::envcfg_csr_t(processor_t* const proc, const reg_t addr, const reg_t mask,
                              const reg_t init):
   masked_csr_t(proc, addr, mask, init) {

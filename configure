@@ -6882,6 +6882,51 @@ printf "%s\n" "#define SOFTFLOAT_ENABLED /**/" >>confdefs.h
 
     # Add subproject to our running list
 
+    subprojects="$subprojects spikedevices"
+
+    # Process the subproject appropriately. If enabled add it to the
+    # $enabled_subprojects running shell variable, set a
+    # SUBPROJECT_ENABLED C define, and include the appropriate
+    # 'subproject.ac'.
+
+
+      { printf "%s\n" "$as_me:${as_lineno-$LINENO}: configuring default subproject : spikedevices" >&5
+printf "%s\n" "$as_me: configuring default subproject : spikedevices" >&6;}
+      ac_config_files="$ac_config_files spikedevices.mk:spikedevices/spikedevices.mk.in"
+
+      enable_spikedevices_sproj="yes"
+      subprojects_enabled="$subprojects_enabled spikedevices"
+
+printf "%s\n" "#define SPIKEDEVICES_ENABLED /**/" >>confdefs.h
+
+
+
+
+
+
+    # Determine if this is a required or an optional subproject
+
+
+
+    # Determine if there is a group with the same name
+
+
+
+    # Create variations of the subproject name suitable for use as a CPP
+    # enabled define, a shell enabled variable, and a shell function
+
+
+
+
+
+
+
+
+
+
+
+    # Add subproject to our running list
+
     subprojects="$subprojects spike_main"
 
     # Process the subproject appropriately. If enabled add it to the
@@ -7676,6 +7721,7 @@ do
     "customext.mk") CONFIG_FILES="$CONFIG_FILES customext.mk:customext/customext.mk.in" ;;
     "fdt.mk") CONFIG_FILES="$CONFIG_FILES fdt.mk:fdt/fdt.mk.in" ;;
     "softfloat.mk") CONFIG_FILES="$CONFIG_FILES softfloat.mk:softfloat/softfloat.mk.in" ;;
+    "spikedevices.mk") CONFIG_FILES="$CONFIG_FILES spikedevices.mk:spikedevices/spikedevices.mk.in" ;;
     "spike_main.mk") CONFIG_FILES="$CONFIG_FILES spike_main.mk:spike_main/spike_main.mk.in" ;;
     "spike_dasm.mk") CONFIG_FILES="$CONFIG_FILES spike_dasm.mk:spike_dasm/spike_dasm.mk.in" ;;
     "config.h") CONFIG_HEADERS="$CONFIG_HEADERS config.h" ;;

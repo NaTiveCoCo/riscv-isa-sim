@@ -51,6 +51,47 @@ void state_t::csr_init(processor_t* const proc, reg_t max_isa)
   add_csr(CSR_MTVEC, mtvec = std::make_shared<tvec_csr_t>(proc, CSR_MTVEC));
   add_csr(CSR_MCAUSE, mcause = std::make_shared<cause_csr_t>(proc, CSR_MCAUSE));
 
+  // 这个专用 Cospike fork 始终提供 NACC；hidden A=0 时保持标准 privilege 行为，
+  // 直到 M 配置并触发 A-world transition。
+  asstatus = std::make_shared<masked_csr_t>(proc, CSR_ASSTATUS, NACC_ASSTATUS_MASK, 0);
+  add_csr(CSR_ASSTATUS, std::make_shared<nacc_status_csr_t>(proc, CSR_ASSTATUS, asstatus));
+
+  astvec = std::make_shared<tvec_csr_t>(proc, CSR_ASTVEC);
+  asepc = std::make_shared<epc_csr_t>(proc, CSR_ASEPC);
+  ascause = std::make_shared<cause_csr_t>(proc, CSR_ASCAUSE);
+  astval = std::make_shared<basic_csr_t>(proc, CSR_ASTVAL, 0);
+  asscratch = std::make_shared<basic_csr_t>(proc, CSR_ASSCRATCH, 0);
+  add_csr(CSR_ASTVEC, std::make_shared<nacc_a_csr_t>(proc, CSR_ASTVEC, astvec));
+  add_csr(CSR_ASEPC, std::make_shared<nacc_a_csr_t>(proc, CSR_ASEPC, asepc));
+  add_csr(CSR_ASCAUSE, std::make_shared<nacc_a_csr_t>(proc, CSR_ASCAUSE, ascause));
+  add_csr(CSR_ASTVAL, std::make_shared<nacc_a_csr_t>(proc, CSR_ASTVAL, astval));
+  add_csr(CSR_ASSCRATCH, std::make_shared<nacc_a_csr_t>(proc, CSR_ASSCRATCH, asscratch));
+
+  aedeleg = std::make_shared<medeleg_csr_t>(proc, CSR_AEDELEG);
+  aideleg = std::make_shared<mideleg_csr_t>(proc, CSR_AIDELEG);
+  add_csr(CSR_AEDELEG, aedeleg);
+  add_csr(CSR_AIDELEG, aideleg);
+
+  asip = std::make_shared<nacc_asip_csr_t>(proc, CSR_ASIP);
+  asie = std::make_shared<basic_csr_t>(proc, CSR_ASIE, 0);
+  add_csr(CSR_ASIP, asip);
+  add_csr(CSR_ASIE, std::make_shared<nacc_asie_csr_t>(proc, CSR_ASIE, asie));
+
+  const reg_t nacc_page_address_mask = ~reg_t(0xfff);
+  add_csr(CSR_SAGENT,
+          sagent = std::make_shared<masked_csr_t>(proc, CSR_SAGENT, nacc_page_address_mask, 0));
+  add_csr(CSR_EAGENT,
+          eagent = std::make_shared<masked_csr_t>(proc, CSR_EAGENT, nacc_page_address_mask, 0));
+  add_csr(CSR_BITMAPSTORAGEBASE,
+          bitmap_storage_base = std::make_shared<masked_csr_t>(proc, CSR_BITMAPSTORAGEBASE,
+                                                               nacc_page_address_mask, 0));
+  add_csr(CSR_TARGETSTART,
+          bitmap_target_start = std::make_shared<masked_csr_t>(proc, CSR_TARGETSTART,
+                                                               nacc_page_address_mask, 0));
+  add_csr(CSR_TARGETEND,
+          bitmap_target_end = std::make_shared<masked_csr_t>(proc, CSR_TARGETEND,
+                                                             nacc_page_address_mask, 0));
+
   const reg_t minstretcfg_mask = !proc->extension_enabled_const(EXT_SMCNTRPMF) ? 0 :
     MHPMEVENT_MINH | MHPMEVENT_SINH | MHPMEVENT_UINH | MHPMEVENT_VSINH | MHPMEVENT_VUINH;
   auto minstretcfg = std::make_shared<smcntrpmf_csr_t>(proc, CSR_MINSTRETCFG, minstretcfg_mask, 0);

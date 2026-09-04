@@ -107,6 +107,8 @@ void state_t::reset(processor_t* const proc, reg_t max_isa)
   FPR.reset();
 
   prv = prev_prv = PRV_M;
+  nacc_a = false;
+  nacc_bitmap_fatal = false;
   v = prev_v = false;
   prv_changed = false;
   v_changed = false;
@@ -295,21 +297,28 @@ void processor_t::take_interrupt(reg_t pending_interrupts)
   // Exit WFI if there are any pending interrupts
   in_wfi = false;
 
-  // M-ints have higher priority over HS-ints and VS-ints
+  // M interrupt 的优先级高于 AS/HS/VS interrupt。A-side delegation 独立于
+  // mideleg；asie 是底层真实 mip source 的 enable view，不是 machine mie 的视图。
   const reg_t mie = get_field(state.mstatus->read(), MSTATUS_MIE);
   const reg_t m_enabled = state.prv < PRV_M || (state.prv == PRV_M && mie);
-  reg_t enabled_interrupts = pending_interrupts & ~state.mideleg->read() & -m_enabled;
-  if (enabled_interrupts == 0) {
+  const reg_t machine_pending = pending_interrupts & state.mie->read();
+  const reg_t machine_deleg = state.nacc_a ? state.aideleg->read() : state.mideleg->read();
+  reg_t enabled_interrupts = machine_pending & ~machine_deleg & -m_enabled;
+  if (enabled_interrupts == 0 && state.nacc_a) {
+    const reg_t asie = get_field(state.asstatus->read(), NACC_ASSTATUS_ASIE);
+    const reg_t as_enabled = state.prv < PRV_S || (state.prv == PRV_S && asie);
+    enabled_interrupts = pending_interrupts & state.aideleg->read() & state.asie->read() & -as_enabled;
+  } else if (enabled_interrupts == 0) {
     // HS-ints have higher priority over VS-ints
     const reg_t deleg_to_hs = state.mideleg->read() & ~state.hideleg->read();
     const reg_t sie = get_field(state.sstatus->read(), MSTATUS_SIE);
     const reg_t hs_enabled = state.v || state.prv < PRV_S || (state.prv == PRV_S && sie);
-    enabled_interrupts = ((pending_interrupts & deleg_to_hs) | (s_pending_interrupts & ~state.hideleg->read())) & -hs_enabled;
+    enabled_interrupts = ((machine_pending & deleg_to_hs) | (s_pending_interrupts & ~state.hideleg->read())) & -hs_enabled;
     if (state.v && enabled_interrupts == 0) {
       // VS-ints have least priority and can only be taken with virt enabled
       const reg_t deleg_to_vs = state.hideleg->read();
       const reg_t vs_enabled = state.prv < PRV_S || (state.prv == PRV_S && sie);
-      enabled_interrupts = ((pending_interrupts & deleg_to_vs) | vs_pending_interrupt) & -vs_enabled;
+      enabled_interrupts = ((machine_pending & deleg_to_vs) | vs_pending_interrupt) & -vs_enabled;
     }
   }
 
@@ -413,13 +422,22 @@ void processor_t::take_trap(trap_t& t, reg_t epc)
   }
 
   // By default, trap to M-mode, unless delegated to HS-mode or VS-mode
-  reg_t vsdeleg, hsdeleg;
+  reg_t vsdeleg, hsdeleg, asdeleg = 0;
   reg_t bit = t.cause();
   bool curr_virt = state.v;
+  bool curr_a = state.nacc_a;
   const reg_t interrupt_bit = (reg_t)1 << (max_xlen - 1);
   bool interrupt = (bit & interrupt_bit) != 0;
   bool supv_double_trap = false;
-  if (interrupt) {
+  if (curr_a && interrupt) {
+    vsdeleg = hsdeleg = 0;
+    asdeleg = state.aideleg->read();
+    bit &= ~((reg_t)1 << (max_xlen - 1));
+  } else if (curr_a) {
+    vsdeleg = 0;
+    hsdeleg = bit == CAUSE_AS_ECALL ? reg_t(1) << bit : 0;
+    asdeleg = bit == CAUSE_AS_ECALL ? 0 : state.aedeleg->read();
+  } else if (interrupt) {
     vsdeleg = (curr_virt && state.prv <= PRV_S) ? state.hideleg->read() : 0;
     hsdeleg = (state.prv <= PRV_S) ? (state.mideleg->read() | state.nonvirtual_sip->read()) : 0;
     bit &= ~((reg_t)1 << (max_xlen - 1));
@@ -446,7 +464,22 @@ void processor_t::take_trap(trap_t& t, reg_t epc)
     // Check vstopi == hvictl.iid
     vti = (hvictl & HVICTL_VTI) && iid != IRQ_S_EXT && iid == bit && get_field(state.vstopi->read(), MTOPI_IID) == iid;
   }
-  if ((state.prv <= PRV_S && bit < max_xlen && ((vsdeleg >> bit) & 1)) || vti) {
+  if (curr_a && state.prv <= PRV_S && bit < max_xlen && ((asdeleg >> bit) & 1)) {
+    const reg_t vector = (state.astvec->read() & 1) && interrupt ? 4 * bit : 0;
+    state.pc = (state.astvec->read() & ~(reg_t)1) + vector;
+    state.ascause->write(t.cause());
+    state.asepc->write(epc);
+    state.astval->write(t.get_tval());
+
+    reg_t as = state.asstatus->read();
+    as = set_field(as, NACC_ASSTATUS_ASPIE, get_field(as, NACC_ASSTATUS_ASIE));
+    as = set_field(as, NACC_ASSTATUS_ASPP, state.prv);
+    as = set_field(as, NACC_ASSTATUS_ASPA, curr_a);
+    as = set_field(as, NACC_ASSTATUS_ASIE, 0);
+    state.asstatus->write(as);
+    state.nacc_a = true;
+    set_privilege(PRV_S, false);
+  } else if ((state.prv <= PRV_S && bit < max_xlen && ((vsdeleg >> bit) & 1)) || vti) {
     // Handle the trap in VS-mode
     const reg_t adjusted_cause = interrupt && bit <= IRQ_VS_EXT && !vti ? bit - 1 : bit;  // VSSIP -> SSIP, etc;
     reg_t vector = (state.vstvec->read() & 1) && interrupt ? 4 * adjusted_cause : 0;
@@ -484,6 +517,10 @@ void processor_t::take_trap(trap_t& t, reg_t epc)
       s = set_field(s, MSTATUS_SDT, 1);
     state.elp = elp_t::NO_LP_EXPECTED;
     state.nonvirtual_sstatus->write(s);
+    reg_t as = state.asstatus->read();
+    as = set_field(as, NACC_ASSTATUS_SPA, curr_a);
+    state.asstatus->write(as);
+    state.nacc_a = false;
     if (extension_enabled('H')) {
       s = state.hstatus->read();
       if (curr_virt)
@@ -531,6 +568,10 @@ void processor_t::take_trap(trap_t& t, reg_t epc)
     state.mstatus->write(s);
     if (state.mstatush) state.mstatush->write(s >> 32);  // log mstatush change
     if (state.tcontrol) state.tcontrol->write((state.tcontrol->read() & CSR_TCONTROL_MTE) ? CSR_TCONTROL_MPTE : 0);
+    reg_t as = state.asstatus->read();
+    as = set_field(as, NACC_ASSTATUS_MPA, curr_a);
+    state.asstatus->write(as);
+    state.nacc_a = false;
     set_privilege(PRV_M, false);
   }
 }

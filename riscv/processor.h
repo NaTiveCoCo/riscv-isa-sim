@@ -81,6 +81,8 @@ struct state_t
   // control and status registers
   std::unordered_map<reg_t, csr_t_p> csrmap;
   reg_t prv;    // TODO: Can this be an enum instead?
+  bool nacc_a;  // hidden A world state；软件不能把它作为 CSR bit 访问
+  bool nacc_bitmap_fatal;  // bitmap metadata 失败后只由 reset 清除的 sticky 状态
   reg_t prev_prv;
   bool prv_changed;
   bool v_changed;
@@ -113,6 +115,23 @@ struct state_t
   virtualized_csr_t_p satp;
   csr_t_p scause;
   csr_t_p scountinhibit;
+
+  // NACC A-side trap 与 world-switch state。
+  csr_t_p asstatus;
+  csr_t_p astvec;
+  csr_t_p asepc;
+  csr_t_p ascause;
+  csr_t_p astval;
+  csr_t_p asscratch;
+  csr_t_p asip;
+  csr_t_p asie;
+  csr_t_p aedeleg;
+  csr_t_p aideleg;
+  csr_t_p sagent;
+  csr_t_p eagent;
+  csr_t_p bitmap_storage_base;
+  csr_t_p bitmap_target_start;
+  csr_t_p bitmap_target_end;
 
   // When taking a trap into HS-mode, we must access the nonvirtualized HS-mode CSRs directly:
   csr_t_p nonvirtual_stvec;
@@ -416,7 +435,7 @@ private:
   unsigned ziccid_flush_count = 0;
   static const unsigned ZICCID_FLUSH_PERIOD = 10;
 
-  void take_pending_interrupt() { take_interrupt(state.mip->read() & state.mie->read()); }
+  void take_pending_interrupt() { take_interrupt(state.mip->read()); }
   void take_interrupt(reg_t mask); // take first enabled interrupt in mask
   void take_trap(trap_t& t, reg_t epc); // take an exception
   void take_trigger_action(triggers::action_t action, reg_t breakpoint_tval, reg_t epc, bool virt);

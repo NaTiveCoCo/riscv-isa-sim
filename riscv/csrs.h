@@ -498,6 +498,45 @@ class masked_csr_t: public basic_csr_t {
   const reg_t mask;
 };
 
+// NACC A-side CSR 使用普通 backing storage 承接硬件 trap 更新，再通过独立的
+// architectural view 执行软件访问权限与字段掩码。
+class nacc_a_csr_t: public csr_t {
+ public:
+  nacc_a_csr_t(processor_t* const proc, const reg_t addr, csr_t_p backing);
+  void verify_permissions(insn_t insn, bool write) const override;
+  reg_t read() const noexcept override;
+ protected:
+  bool unlogged_write(const reg_t val) noexcept override;
+  csr_t_p backing;
+};
+
+class nacc_status_csr_t final: public nacc_a_csr_t {
+ public:
+  nacc_status_csr_t(processor_t* const proc, const reg_t addr, csr_t_p backing);
+  void verify_permissions(insn_t insn, bool write) const override;
+  reg_t read() const noexcept override;
+ protected:
+  bool unlogged_write(const reg_t val) noexcept override;
+ private:
+  reg_t visible_mask() const noexcept;
+};
+
+class nacc_asip_csr_t final: public nacc_a_csr_t {
+ public:
+  nacc_asip_csr_t(processor_t* const proc, const reg_t addr);
+  reg_t read() const noexcept override;
+ protected:
+  bool unlogged_write(const reg_t val) noexcept override;
+};
+
+class nacc_asie_csr_t final: public nacc_a_csr_t {
+ public:
+  nacc_asie_csr_t(processor_t* const proc, const reg_t addr, csr_t_p backing);
+  reg_t read() const noexcept override;
+ protected:
+  bool unlogged_write(const reg_t val) noexcept override;
+};
+
 class envcfg_csr_t: public masked_csr_t {
  public:
   envcfg_csr_t(processor_t* const proc, const reg_t addr, const reg_t mask, const reg_t init);
