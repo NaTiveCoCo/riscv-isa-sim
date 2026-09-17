@@ -607,6 +607,10 @@ reg_t rv32_low_csr_t::read() const noexcept {
   return orig->read() & 0xffffffffU;
 }
 
+reg_t rv32_low_csr_t::read_for_rmw(reg_t original_value) const noexcept {
+  return orig->read_for_rmw(original_value) & 0xffffffffU;
+}
+
 void rv32_low_csr_t::verify_permissions(insn_t insn, bool write) const {
   orig->verify_permissions(insn, write);
 }
@@ -807,6 +811,12 @@ void mip_csr_t::write_with_mask(const reg_t mask, const reg_t val) noexcept {
 
 reg_t mip_csr_t::read() const noexcept {
   return val | state->hvip->basic_csr_t::read() | ((state->mvien->read() & MIP_SEIP) ? 0 : (state->mvip->basic_csr_t::read() & MIP_SEIP));
+}
+
+reg_t mip_csr_t::read_for_rmw(reg_t original_value) const noexcept {
+  // SEIP 的读值为软件位 OR 外部输入；RMW 只修改软件位，不能锁存 PLIC 输入。
+  return (original_value & ~MIP_SEIP) |
+    ((state->mvien->read() & MIP_SEIP) ? 0 : (state->mvip->basic_csr_t::read() & MIP_SEIP));
 }
 
 void mip_csr_t::backdoor_write_with_mask(const reg_t mask, const reg_t val) noexcept {

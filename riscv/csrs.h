@@ -38,6 +38,9 @@ class csr_t {
   // checking needed or allowed. Side effects not allowed.
   virtual reg_t read() const noexcept = 0;
 
+  // CSRRS/CSRRC 的写回基值可以不同于 rd 的读值，例如 mip.SEIP 的硬件输入。
+  virtual reg_t read_for_rmw(reg_t original_value) const noexcept { return original_value; }
+
   // write() updates the architectural value of this CSR. No
   // permission checking needed or allowed.
   // Child classes must implement unlogged_write()
@@ -281,6 +284,7 @@ class rv32_low_csr_t: public csr_t {
  public:
   rv32_low_csr_t(processor_t* const proc, const reg_t addr, csr_t_p orig);
   virtual reg_t read() const noexcept override;
+  reg_t read_for_rmw(reg_t original_value) const noexcept override;
   virtual void verify_permissions(insn_t insn, bool write) const override;
  protected:
   virtual bool unlogged_write(const reg_t val) noexcept override;
@@ -376,6 +380,7 @@ class mip_csr_t: public mip_or_mie_csr_t {
  public:
   mip_csr_t(processor_t* const proc, const reg_t addr);
   virtual reg_t read() const noexcept override final;
+  reg_t read_for_rmw(reg_t original_value) const noexcept override;
 
   void write_with_mask(const reg_t mask, const reg_t val) noexcept override;
 

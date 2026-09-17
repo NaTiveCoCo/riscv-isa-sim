@@ -289,6 +289,10 @@ public:
   uint32_t get_id() const { return id; }
   reg_t get_csr(int which, insn_t insn, bool write, bool peek = 0);
   reg_t get_csr(int which) { return get_csr(which, insn_t(0), false, true); }
+  // 仅在 get_csr 已完成当前指令的权限检查后用于 RMW 写回。
+  reg_t get_csr_rmw(int which, reg_t original_value) {
+    return state.csrmap.at(which)->read_for_rmw(original_value);
+  }
   mmu_t* get_mmu() { return mmu; }
   state_t* get_state() { return &state; }
   unsigned get_xlen() const { return xlen; }
