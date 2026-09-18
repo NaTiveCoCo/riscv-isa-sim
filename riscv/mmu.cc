@@ -71,15 +71,18 @@ reg_t mmu_t::translate(mem_access_info_t access_info, reg_t len)
   if (effective_a && mode == PRV_U && ((addr >> 38) & 1))
     throw_access_exception(virt, addr, type);
 
-  // A world 的地址空间前置条件不以 bitmap range 已配置为可选开关；未配置
-  // bitmap 或 Bare satp 都无法证明 live root 是 ROOT_L0，必须 fail closed。
+  // Effective AS may bootstrap in Bare; AU still requires a protected root.
+  // Paging in either A-side mode always validates ROOT_L0, including MPRV data.
   if (effective_a && mode <= PRV_S) {
     const reg_t satp = proc->state.satp->readvirt(virt);
-    if (get_field(satp, SATP64_MODE) == SATP_MODE_OFF)
-      throw_access_exception(virt, addr, type);
-    const reg_t root_paddr = get_field(satp, SATP64_PPN) << PGSHIFT;
-    if (nacc_bitmap_tag(root_paddr, access_info) != 1)
-      throw_access_exception(virt, addr, type);
+    if (get_field(satp, SATP64_MODE) == SATP_MODE_OFF) {
+      if (mode != PRV_S)
+        throw_access_exception(virt, addr, type);
+    } else {
+      const reg_t root_paddr = get_field(satp, SATP64_PPN) << PGSHIFT;
+      if (nacc_bitmap_tag(root_paddr, access_info) != 1)
+        throw_access_exception(virt, addr, type);
+    }
   }
 
   reg_t paddr = walk(access_info) | (addr & (PGSIZE-1));
