@@ -783,15 +783,16 @@ reg_t mmu_t::walk(mem_access_info_t access_info)
     bool ss_page = !(pte & PTE_R) && (pte & PTE_W) && !(pte & PTE_X);
     int napot_bits = ((pte & PTE_N) ? (ctz(ppn) + 1) : 0);
 
-    // The RTL PTW validates a final 4 KiB bitmap lookup before requester
+    // The RTL PTW validates a final 4 KiB subpage bitmap lookup before requester
     // permissions. An Agent/target overlap poisons the hart even when the
     // access would also fail PTE, final PMP or Agent-region authorization.
     // Check only a valid physical leaf; Bare and PTP reads do not use this path.
-    const bool nacc_final_leaf = i == 0 && !(pte & PTE_ATTR) &&
+    const reg_t subpage_mask = (reg_t(1) << ptshift) - 1;
+    const bool nacc_final_leaf = !(pte & PTE_ATTR) && !(ppn & subpage_mask) &&
       (pte & PTE_V) && ((pte & PTE_R) || ((pte & PTE_X) && !(pte & PTE_W))) &&
       (ppn >> (proc->paddr_bits() - PGSHIFT)) == 0;
     if (nacc_final_leaf) {
-      const reg_t page = ppn << PGSHIFT;
+      const reg_t page = (ppn | ((addr >> PGSHIFT) & subpage_mask)) << PGSHIFT;
       if (page >= proc->state.bitmap_target_start->read() &&
           page < proc->state.bitmap_target_end->read() &&
           page >= proc->state.sagent->read() && page < proc->state.eagent->read()) {
