@@ -33,8 +33,10 @@ void mmu_t::flush_icache()
     icache[i].tag = -1;
 }
 
-void mmu_t::flush_tlb()
+void mmu_t::flush_tlb(const char* reason)
 {
+  nacc_trace("flush", reason);
+  nacc_root_valid = false;
   memset(tlb_insn, -1, sizeof(tlb_insn));
   memset(tlb_load, -1, sizeof(tlb_load));
   memset(tlb_store, -1, sizeof(tlb_store));
@@ -52,7 +54,7 @@ void throw_access_exception(bool virt, reg_t addr, access_type type)
   }
 }
 
-reg_t mmu_t::translate(mem_access_info_t access_info, reg_t len)
+reg_t mmu_t::translate(mem_access_info_t access_info, reg_t len, uint8_t* raw_tag)
 {
   reg_t addr = access_info.transformed_vaddr;
   access_type type = access_info.type;
@@ -62,185 +64,14 @@ reg_t mmu_t::translate(mem_access_info_t access_info, reg_t len)
   bool virt = access_info.effective_virt;
   reg_t mode = (reg_t) access_info.effective_priv;
 
-  // RTL 在 translation/PMP 之前让 sticky fatal 优先拒绝所有 S/U-effective 请求。
-  // M-effective 访问是 reset 前诊断和恢复所需的可信兜底。
-  if (proc->state.nacc_bitmap_fatal && mode != PRV_M)
-    throw_access_exception(virt, addr, type);
-
-  const bool effective_a = nacc_effective_a(access_info);
-  if (effective_a && mode == PRV_U && ((addr >> 38) & 1))
-    throw_access_exception(virt, addr, type);
-
-  // Effective AS may bootstrap in Bare; AU still requires a protected root.
-  // Paging in either A-side mode always validates ROOT_L0, including MPRV data.
-  if (effective_a && mode <= PRV_S) {
-    const reg_t satp = proc->state.satp->readvirt(virt);
-    if (get_field(satp, SATP64_MODE) == SATP_MODE_OFF) {
-      if (mode != PRV_S)
-        throw_access_exception(virt, addr, type);
-    } else {
-      const reg_t root_paddr = get_field(satp, SATP64_PPN) << PGSHIFT;
-      if (nacc_bitmap_tag(root_paddr, access_info) != 1)
-        throw_access_exception(virt, addr, type);
-    }
-  }
+  nacc_check_root(access_info);
 
   reg_t paddr = walk(access_info) | (addr & (PGSIZE-1));
   if (!pmp_ok(paddr, len, access_info.flags.ss_access ? STORE : type, mode, access_info.flags.hlvx))
     throw_access_exception(virt, addr, access_info.flags.ss_access ? STORE : type);
-  nacc_check_access(access_info, paddr, len);
+  const auto tag = nacc_check_access(access_info, paddr, len);
+  if (raw_tag) *raw_tag = tag;
   return paddr;
-}
-
-bool mmu_t::nacc_configured() const
-{
-  return proc && (proc->state.nacc_bitmap_fatal || nacc_bitmap_configured() ||
-         (proc->state.eagent && proc->state.eagent->read() > proc->state.sagent->read()));
-}
-
-bool mmu_t::nacc_bitmap_configured() const
-{
-  return proc && proc->state.bitmap_target_end &&
-         proc->state.bitmap_target_end->read() > proc->state.bitmap_target_start->read();
-}
-
-bool mmu_t::nacc_effective_a(const mem_access_info_t& access_info) const
-{
-  if (access_info.type != FETCH && proc->state.prv == PRV_M &&
-      get_field(proc->state.mstatus->read(), MSTATUS_MPRV) &&
-      access_info.effective_priv != PRV_M)
-    return get_field(proc->state.asstatus->read(), NACC_ASSTATUS_MPA);
-  return proc->state.nacc_a;
-}
-
-uint8_t mmu_t::nacc_bitmap_tag(reg_t paddr, const mem_access_info_t& access_info)
-{
-  if (proc->state.nacc_bitmap_fatal)
-    throw_access_exception(access_info.effective_virt, access_info.transformed_vaddr, access_info.type);
-
-  const reg_t start = proc->state.bitmap_target_start->read();
-  const reg_t end = proc->state.bitmap_target_end->read();
-  const reg_t storage = proc->state.bitmap_storage_base->read();
-  // 没有有序 target range 时不存在 metadata request；A-world root gate 只应得到
-  // 普通 access fault，不能把未配置状态升级为 reset-only fatal。
-  if ((start & (PGSIZE - 1)) || (end & (PGSIZE - 1)) || end <= start)
-    throw_access_exception(access_info.effective_virt, access_info.transformed_vaddr, access_info.type);
-  if (paddr < start || paddr >= end)
-    return 0;
-
-  const reg_t page_index = (paddr - start) >> PGSHIFT;
-  const reg_t page_count = (end - start) >> PGSHIFT;
-  const reg_t bitmap_bytes = (page_count + 3) >> 2;
-  const reg_t bitmap_addr = storage + (page_index >> 2);
-  const reg_t bitmap_end = storage + bitmap_bytes;
-  const unsigned paddr_bits = proc->paddr_bits();
-  const auto fits_paddr = [paddr_bits](reg_t value) {
-    return paddr_bits >= sizeof(reg_t) * 8 || (value >> paddr_bits) == 0;
-  };
-  const reg_t agent_start = proc->state.sagent->read();
-  const reg_t agent_end = proc->state.eagent->read();
-  const bool lookup_in_agent = agent_end > agent_start && paddr >= agent_start && paddr < agent_end;
-  if (page_count > ~reg_t(0) - 3 || bitmap_end < storage || bitmap_addr < storage ||
-      bitmap_addr >= bitmap_end || !fits_paddr(start) ||
-      (paddr_bits < sizeof(reg_t) * 8 && end > (reg_t(1) << paddr_bits)) ||
-      !fits_paddr(storage) || !fits_paddr(bitmap_addr) ||
-      (paddr_bits < sizeof(reg_t) * 8 && bitmap_end > (reg_t(1) << paddr_bits)) ||
-      lookup_in_agent) {
-    proc->state.nacc_bitmap_fatal = true;
-    throw_access_exception(access_info.effective_virt, access_info.transformed_vaddr, access_info.type);
-  }
-  if (!pmp_ok(bitmap_addr, 1, LOAD, PRV_M, false)) {
-    proc->state.nacc_bitmap_fatal = true;
-    throw_access_exception(access_info.effective_virt, access_info.transformed_vaddr, access_info.type);
-  }
-  uint8_t byte = 0;
-  void* host_addr = sim->addr_to_mem(bitmap_addr);
-  if (host_addr)
-    memcpy(&byte, host_addr, 1);
-  else if (!mmio_load(bitmap_addr, 1, &byte)) {
-    proc->state.nacc_bitmap_fatal = true;
-    throw_access_exception(access_info.effective_virt, access_info.transformed_vaddr, access_info.type);
-  }
-  return (byte >> ((page_index & 3) * 2)) & 3;
-}
-
-void mmu_t::nacc_check_access(const mem_access_info_t& access_info, reg_t paddr, reg_t len)
-{
-  const reg_t mode = access_info.effective_priv;
-  const bool effective_a = nacc_effective_a(access_info);
-  const reg_t access_end = paddr + len;
-  if (access_end < paddr)
-    throw_access_exception(access_info.effective_virt, access_info.transformed_vaddr, access_info.type);
-
-  const reg_t agent_start = proc->state.sagent->read();
-  const reg_t agent_end = proc->state.eagent->read();
-  if (agent_end > agent_start && paddr < agent_end && access_end > agent_start &&
-      !(mode == PRV_M || (effective_a && mode == PRV_S)))
-    throw_access_exception(access_info.effective_virt, access_info.transformed_vaddr, access_info.type);
-
-  // Agent region 是独立物理区间，不以 bitmap target 是否配置为开关。
-  if (!nacc_bitmap_configured())
-    return;
-
-  const reg_t target_start = proc->state.bitmap_target_start->read();
-  const reg_t target_end = proc->state.bitmap_target_end->read();
-  const reg_t page_count = (target_end - target_start) >> PGSHIFT;
-  const reg_t bitmap_bytes = (page_count + 3) >> 2;
-  const reg_t storage_start = proc->state.bitmap_storage_base->read();
-  const reg_t storage_end = storage_start + bitmap_bytes;
-  if (storage_end < storage_start)
-    throw_access_exception(access_info.effective_virt, access_info.transformed_vaddr, access_info.type);
-  if (paddr < storage_end && access_end > storage_start &&
-      (access_info.type == FETCH || !(mode == PRV_M || (effective_a && mode == PRV_S))))
-    throw_access_exception(access_info.effective_virt, access_info.transformed_vaddr, access_info.type);
-
-  // M-effective data access 是可信兜底，不读取 bitmap metadata；PMP 与 backing fetch
-  // 禁令已经分别在 translate() 和上面的区间检查中执行。
-  if (mode == PRV_M)
-    return;
-
-  if (proc->state.nacc_bitmap_fatal)
-    throw_access_exception(access_info.effective_virt, access_info.transformed_vaddr, access_info.type);
-
-  const uint8_t tag = nacc_bitmap_tag(paddr, access_info);
-  bool allowed = false;
-  switch (tag) {
-    case 0: // NORMAL
-      allowed = true;
-      break;
-    case 1: { // ROOT_L0
-      if (mode == PRV_M)
-        allowed = true;
-      else if (access_info.type == FETCH)
-        allowed = false;
-      else if (effective_a && mode == PRV_S)
-        allowed = true;
-      else {
-        const reg_t satp = proc->state.satp->readvirt(access_info.effective_virt);
-        const reg_t root_ppn = get_field(satp, SATP64_PPN);
-        const bool translation_enabled = get_field(satp, SATP64_MODE) != SATP_MODE_OFF;
-        const bool current_root = translation_enabled && (paddr >> PGSHIFT) == root_ppn;
-        if (access_info.type == LOAD)
-          allowed = current_root;
-        else
-          allowed = !effective_a && mode == PRV_S && current_root &&
-                    (paddr & (PGSIZE - 1)) >= PGSIZE / 2 &&
-                    ((paddr & (PGSIZE - 1)) + len) <= PGSIZE;
-      }
-      break;
-    }
-    case 2: // PRIVATE_DATA
-      allowed = mode == PRV_M || effective_a;
-      break;
-    case 3: // PRIVATE_COPY_PENDING
-      allowed = mode == PRV_M ||
-                (access_info.type != FETCH && effective_a && mode == PRV_S);
-      break;
-    default:
-      abort();
-  }
-  if (!allowed)
-    throw_access_exception(access_info.effective_virt, access_info.transformed_vaddr, access_info.type);
 }
 
 inline mmu_t::insn_parcel_t mmu_t::perform_intrapage_fetch(reg_t vaddr, uintptr_t host_addr, reg_t paddr)
@@ -265,6 +96,7 @@ mmu_t::insn_parcel_t mmu_t::fetch_slow_path(reg_t vaddr)
 
   if  (auto [tlb_hit, host_addr, paddr] = access_tlb(tlb_insn, vaddr, TLB_FLAGS & ~TLB_CHECK_TRIGGERS); tlb_hit) {
     // Fast path for simple cases
+    nacc_check_hit(tlb_insn, vaddr, sizeof(insn_parcel_t), FETCH);
     return perform_intrapage_fetch(vaddr, host_addr, paddr);
   }
 
@@ -273,10 +105,13 @@ mmu_t::insn_parcel_t mmu_t::fetch_slow_path(reg_t vaddr)
   check_triggers(triggers::OPERATION_EXECUTE, vaddr, access_info.effective_virt);
 
   if (!tlb_hit) {
-    paddr = translate(access_info, sizeof(insn_parcel_t));
+    uint8_t raw_tag = 0;
+    paddr = translate(access_info, sizeof(insn_parcel_t), &raw_tag);
     host_addr = (uintptr_t)sim->addr_to_mem(paddr);
 
-    refill_tlb(vaddr, paddr, (char*)host_addr, FETCH);
+    refill_tlb(vaddr, paddr, (char*)host_addr, FETCH, raw_tag);
+  } else {
+    nacc_check_hit(tlb_insn, vaddr, sizeof(insn_parcel_t), FETCH);
   }
 
   auto res = perform_intrapage_fetch(vaddr, host_addr, paddr);
@@ -405,15 +240,18 @@ void mmu_t::load_slow_path_intrapage(reg_t len, uint8_t* bytes, mem_access_info_
   reg_t vaddr = access_info.vaddr;
   auto [tlb_hit, host_addr, paddr] = access_tlb(tlb_load, vaddr, TLB_FLAGS);
   if (!tlb_hit || access_info.flags.is_special_access()) {
-    paddr = translate(access_info, len);
+    uint8_t raw_tag = 0;
+    paddr = translate(access_info, len, &raw_tag);
     host_addr = (uintptr_t)sim->addr_to_mem(paddr);
 
     if (!access_info.flags.is_special_access())
-      refill_tlb(vaddr, paddr, (char*)host_addr, LOAD);
+      refill_tlb(vaddr, paddr, (char*)host_addr, LOAD, raw_tag);
 
     if (access_info.flags.lr && !sim->reservable(paddr)) {
       throw trap_load_access_fault(access_info.effective_virt, access_info.transformed_vaddr, 0, 0);
     }
+  } else {
+    nacc_check_hit(tlb_load, vaddr, len, LOAD, &access_info);
   }
 
   perform_intrapage_load(vaddr, host_addr, paddr, len, bytes, access_info.flags);
@@ -432,11 +270,13 @@ void mmu_t::load_slow_path(reg_t original_addr, reg_t len, uint8_t* bytes, xlate
     bool aligned = (original_addr & (len - 1)) == 0;
 
     if (likely(tlb_hit && (aligned || (intrapage && is_misaligned_enabled())))) {
+      nacc_check_hit(tlb_load, original_addr, len, LOAD);
       return perform_intrapage_load(original_addr, host_addr, paddr, len, bytes, xlate_flags);
     }
   }
 
   auto access_info = generate_access_info(original_addr, LOAD, xlate_flags);
+  access_info.nacc_span_len = len;
   reg_t transformed_addr = access_info.transformed_vaddr;
   check_triggers(triggers::OPERATION_LOAD, transformed_addr, access_info.effective_virt);
 
@@ -454,6 +294,8 @@ void mmu_t::load_slow_path(reg_t original_addr, reg_t len, uint8_t* bytes, xlate
     load_slow_path_intrapage(len_page0, bytes, access_info);
     if (len_page0 != len) {
       auto tail_access_info = generate_access_info(original_addr + len_page0, LOAD, xlate_flags);
+      tail_access_info.nacc_span_len = len;
+      tail_access_info.nacc_span_offset = len_page0;
       load_slow_path_intrapage(len - len_page0, bytes + len_page0, tail_access_info);
     }
   }
@@ -487,26 +329,30 @@ void mmu_t::store_slow_path_intrapage(reg_t len, const uint8_t* bytes, mem_acces
   reg_t vaddr = access_info.vaddr;
   auto [tlb_hit, host_addr, paddr] = access_tlb(tlb_store, vaddr, TLB_FLAGS);
   if (!tlb_hit || access_info.flags.is_special_access()) {
-    paddr = translate(access_info, len);
+    uint8_t raw_tag = 0;
+    paddr = translate(access_info, len, &raw_tag);
     host_addr = (uintptr_t)sim->addr_to_mem(paddr);
 
     if (!access_info.flags.is_special_access())
-      refill_tlb(vaddr, paddr, (char*)host_addr, STORE);
+      refill_tlb(vaddr, paddr, (char*)host_addr, STORE, raw_tag);
+  } else {
+    nacc_check_hit(tlb_store, vaddr, len, STORE, &access_info);
   }
 
   if (actually_store)
     perform_intrapage_store(vaddr, host_addr, paddr, len, bytes, access_info.flags);
 }
 
-void mmu_t::store_slow_path(reg_t original_addr, reg_t len, const uint8_t* bytes, xlate_flags_t xlate_flags, bool actually_store, bool UNUSED require_alignment)
+void mmu_t::store_slow_path(reg_t original_addr, reg_t len, const uint8_t* bytes, xlate_flags_t xlate_flags, bool actually_store, bool UNUSED require_alignment, reg_t span_len, reg_t span_offset)
 {
-  if (likely(!xlate_flags.is_special_access())) {
+  if (likely(!xlate_flags.is_special_access() && !span_len)) {
     // Fast path for simple cases
     auto [tlb_hit, host_addr, paddr] = access_tlb(tlb_store, original_addr, TLB_FLAGS & ~TLB_CHECK_TRIGGERS);
     bool intrapage = (original_addr % PGSIZE) + len <= PGSIZE;
     bool aligned = (original_addr & (len - 1)) == 0;
 
     if (likely(tlb_hit && (aligned || (intrapage && is_misaligned_enabled())))) {
+      nacc_check_hit(tlb_store, original_addr, len, STORE);
       if (actually_store)
         perform_intrapage_store(original_addr, host_addr, paddr, len, bytes, xlate_flags);
       return;
@@ -514,6 +360,8 @@ void mmu_t::store_slow_path(reg_t original_addr, reg_t len, const uint8_t* bytes
   }
 
   auto access_info = generate_access_info(original_addr, STORE, xlate_flags);
+  access_info.nacc_span_len = span_len ? span_len : len;
+  access_info.nacc_span_offset = span_offset;
   reg_t transformed_addr = access_info.transformed_vaddr;
   if (actually_store) {
     reg_t trig_len = len;
@@ -538,6 +386,8 @@ void mmu_t::store_slow_path(reg_t original_addr, reg_t len, const uint8_t* bytes
     store_slow_path_intrapage(len_page0, bytes, access_info, actually_store);
     if (len_page0 != len) {
       auto tail_access_info = generate_access_info(original_addr + len_page0, STORE, xlate_flags);
+      tail_access_info.nacc_span_len = access_info.nacc_span_len;
+      tail_access_info.nacc_span_offset = span_offset + len_page0;
       store_slow_path_intrapage(len - len_page0, bytes + len_page0, tail_access_info, actually_store);
     }
   } else {
@@ -558,20 +408,20 @@ void mmu_t::store_slow_path(reg_t original_addr, reg_t len, const uint8_t* bytes
   }
 }
 
-tlb_entry_t mmu_t::refill_tlb(reg_t vaddr, reg_t paddr, char* host_addr, access_type type)
+tlb_entry_t mmu_t::refill_tlb(reg_t vaddr, reg_t paddr, char* host_addr, access_type type, uint8_t raw_tag)
 {
   reg_t idx = (vaddr >> PGSHIFT) % TLB_ENTRIES;
   reg_t expected_tag = vaddr >> PGSHIFT;
   reg_t base_paddr = paddr & ~reg_t(PGSIZE - 1);
 
-  tlb_entry_t entry = {uintptr_t(host_addr) - (vaddr % PGSIZE), paddr - (vaddr % PGSIZE)};
+  tlb_entry_t entry = {uintptr_t(host_addr) - (vaddr % PGSIZE), paddr - (vaddr % PGSIZE), raw_tag, nacc_guarded_page(paddr)};
 
-  if (nacc_configured()
-      || in_mprv()
+  if (in_mprv()
       || !pmp_homogeneous(base_paddr, PGSIZE)
       || (proc && proc->get_log_commits_enabled()))
     return entry;
 
+  nacc_trace("refill", "translation", vaddr, paddr, type, raw_tag);
   auto trace_flag = tracer.interested_in_range(base_paddr, base_paddr + PGSIZE, type) ? TLB_CHECK_TRACER : 0;
   auto mmio_flag = host_addr ? 0 : TLB_MMIO;
 
@@ -737,6 +587,7 @@ reg_t mmu_t::s2xlate(reg_t gva, reg_t gpa, access_type type, access_type trap_ty
 
 reg_t mmu_t::walk(mem_access_info_t access_info)
 {
+  nacc_trace("walk", "translation", access_info.vaddr, 0, access_info.type);
   access_type type = access_info.type;
   reg_t addr = access_info.transformed_vaddr;
   bool virt = access_info.effective_virt;
@@ -796,8 +647,8 @@ reg_t mmu_t::walk(mem_access_info_t access_info)
       if (page >= proc->state.bitmap_target_start->read() &&
           page < proc->state.bitmap_target_end->read() &&
           page >= proc->state.sagent->read() && page < proc->state.eagent->read()) {
-        proc->state.nacc_bitmap_fatal = true;
-        throw_access_exception(virt, addr, type);
+        // Preserve the walk-selected trap type, including shadow-stack stores.
+        nacc_poison({access_info.vaddr, addr, mode, virt, access_info.flags, type});
       }
     }
 

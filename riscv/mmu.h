@@ -49,6 +49,8 @@ struct icache_entry_t {
 struct tlb_entry_t {
   uintptr_t host_addr;
   reg_t target_addr;
+  uint8_t nacc_raw_tag;
+  bool nacc_guarded;
 };
 
 struct dtlb_entry_t {
@@ -75,6 +77,8 @@ struct mem_access_info_t {
   const bool effective_virt;
   const xlate_flags_t flags;
   const access_type type;
+  reg_t nacc_span_len = 0;
+  reg_t nacc_span_offset = 0;
 };
 
 void throw_access_exception(bool virt, reg_t addr, access_type type);
@@ -86,11 +90,32 @@ class mmu_t
 private:
   reg_t get_pmlen(bool effective_virt, reg_t effective_priv, xlate_flags_t flags) const;
   mem_access_info_t generate_access_info(reg_t addr, access_type type, xlate_flags_t xlate_flags);
-  bool nacc_configured() const;
   bool nacc_bitmap_configured() const;
   bool nacc_effective_a(const mem_access_info_t& access_info) const;
   uint8_t nacc_bitmap_tag(reg_t paddr, const mem_access_info_t& access_info);
-  void nacc_check_access(const mem_access_info_t& access_info, reg_t paddr, reg_t len);
+  uint8_t nacc_check_access(const mem_access_info_t& access_info, reg_t paddr, reg_t len, const uint8_t* cached_tag = nullptr);
+  void nacc_check_root(const mem_access_info_t& access_info);
+  [[noreturn]] void nacc_poison(const mem_access_info_t& access_info);
+  uint8_t nacc_root_tag(reg_t paddr, const mem_access_info_t& access_info);
+  bool nacc_guarded_page(reg_t paddr) const;
+  void nacc_check_hit_slow(const tlb_entry_t& entry, reg_t addr, reg_t len, access_type type, const mem_access_info_t* original);
+  void ALWAYS_INLINE nacc_check_hit(const dtlb_entry_t* tlb, reg_t addr, reg_t len, access_type type, const mem_access_info_t* original = nullptr) {
+    const auto& entry = tlb[(addr >> PGSHIFT) % TLB_ENTRIES].data;
+    nacc_trace("hit", "translation", addr, entry.target_addr + addr % PGSIZE, type, entry.nacc_raw_tag);
+    // NORMAL outside guarded regions needs no role/span test in the ordinary world.
+    // Standard privilege/MPRV changes invalidate the entries before they can be reused.
+    if (proc && (entry.nacc_raw_tag || entry.nacc_guarded || proc->state.nacc_a || proc->state.nacc_bitmap_fatal))
+      nacc_check_hit_slow(entry, addr, len, type, original);
+  }
+  bool nacc_root_valid = false;
+  reg_t nacc_root_paddr = 0;
+  uint8_t nacc_root_raw_tag = 0;
+#ifdef NACC_MMU_TRACE
+  unsigned long nacc_trace_epoch = 0;
+  void nacc_trace(const char* event, const char* reason, reg_t va = 0, reg_t pa = 0, access_type type = LOAD, uint8_t tag = 0);
+#else
+  void nacc_trace(const char*, const char*, reg_t = 0, reg_t = 0, access_type = LOAD, uint8_t = 0) {}
+#endif
 
 public:
   mmu_t(simif_t* sim, endianness_t endianness, processor_t* proc, reg_t cache_blocksz);
@@ -102,7 +127,8 @@ public:
     bool aligned = (addr & (sizeof(T) - 1)) == 0;
     auto [tlb_hit, host_addr, _] = access_tlb(tlb_load, addr);
 
-    if (likely(!nacc_configured() && !xlate_flags.is_special_access() && aligned && tlb_hit)) {
+    if (likely(!xlate_flags.is_special_access() && aligned && tlb_hit)) {
+      nacc_check_hit(tlb_load, addr, sizeof(T), LOAD);
       res = *(target_endian<T>*)host_addr;
     } else {
       load_slow_path(addr, sizeof(T), (uint8_t*)&res, xlate_flags);
@@ -142,7 +168,8 @@ public:
     bool aligned = (addr & (sizeof(T) - 1)) == 0;
     auto [tlb_hit, host_addr, _] = access_tlb(tlb_store, addr);
 
-    if (!nacc_configured() && !xlate_flags.is_special_access() && likely(aligned && tlb_hit)) {
+    if (!xlate_flags.is_special_access() && likely(aligned && tlb_hit)) {
+      nacc_check_hit(tlb_store, addr, sizeof(T), STORE);
       *(target_endian<T>*)host_addr = to_target(val);
     } else {
       target_endian<T> target_val = to_target(val);
@@ -219,8 +246,13 @@ public:
       throw trap_store_address_misaligned((proc) ? proc->state.v : false, addr, 0, 0);
     }
 
-    store<uint64_t>(addr, val.v[0]);
-    store<uint64_t>(addr + 8, val.v[1]);
+    // Preserve the full span for ROOT_L0 before the slow path splits pages.
+    // Each half retains its original target-endian representation.
+    target_endian<uint64_t> halves[] = {to_target(val.v[0]), to_target(val.v[1])};
+    MMU_OBSERVE_STORE(addr, val.v[0], sizeof(uint64_t));
+    store_slow_path(addr, 8, (const uint8_t*)&halves[0], {}, true, false, sizeof(val), 0);
+    MMU_OBSERVE_STORE(addr + 8, val.v[1], sizeof(uint64_t));
+    store_slow_path(addr + 8, 8, (const uint8_t*)&halves[1], {}, true, false, sizeof(val), 8);
   }
 
   float128_t load_float128(reg_t addr)
@@ -376,7 +408,7 @@ public:
     return std::make_tuple(hit, host_addr, paddr);
   }
 
-  void flush_tlb();
+  void flush_tlb(const char* reason = "standard");
   void flush_icache();
 
   void register_memtracer(memtracer_t*);
@@ -424,7 +456,7 @@ private:
   dtlb_entry_t tlb_insn[TLB_ENTRIES];
 
   // finish translation on a TLB miss and update the TLB
-  tlb_entry_t refill_tlb(reg_t vaddr, reg_t paddr, char* host_addr, access_type type);
+  tlb_entry_t refill_tlb(reg_t vaddr, reg_t paddr, char* host_addr, access_type type, uint8_t raw_tag);
   const char* fill_from_mmio(reg_t vaddr, reg_t paddr);
 
   // perform a stage2 translation for a given guest address
@@ -440,7 +472,7 @@ private:
   void load_slow_path(reg_t original_addr, reg_t len, uint8_t* bytes, xlate_flags_t xlate_flags);
   void load_slow_path_intrapage(reg_t len, uint8_t* bytes, mem_access_info_t access_info);
   void perform_intrapage_load(reg_t vaddr, uintptr_t host_addr, reg_t paddr, reg_t len, uint8_t* bytes, xlate_flags_t xlate_flags);
-  void store_slow_path(reg_t original_addr, reg_t len, const uint8_t* bytes, xlate_flags_t xlate_flags, bool actually_store, bool require_alignment);
+  void store_slow_path(reg_t original_addr, reg_t len, const uint8_t* bytes, xlate_flags_t xlate_flags, bool actually_store, bool require_alignment, reg_t span_len = 0, reg_t span_offset = 0);
   void store_slow_path_intrapage(reg_t len, const uint8_t* bytes, mem_access_info_t access_info, bool actually_store);
   void perform_intrapage_store(reg_t vaddr, uintptr_t host_addr, reg_t paddr, reg_t len, const uint8_t* bytes, xlate_flags_t xlate_flags);
   bool mmio_fetch(reg_t paddr, size_t len, uint8_t* bytes);
@@ -452,7 +484,7 @@ private:
     check_triggers(operation, address, virt, address, data);
   }
   void check_triggers(triggers::operation_t operation, reg_t address, bool virt, reg_t tval, std::optional<reg_t> data);
-  reg_t translate(mem_access_info_t access_info, reg_t len);
+  reg_t translate(mem_access_info_t access_info, reg_t len, uint8_t* raw_tag = nullptr);
 
   reg_t pte_load(reg_t pte_paddr, reg_t addr, bool virt, access_type trap_type, size_t ptesize) {
     if (ptesize == 4)
@@ -502,8 +534,10 @@ private:
   }
 
   inline insn_parcel_t fetch_insn_parcel(reg_t addr) {
-    if (auto [tlb_hit, host_addr, paddr] = access_tlb(tlb_insn, addr); !nacc_configured() && tlb_hit)
+    if (auto [tlb_hit, host_addr, paddr] = access_tlb(tlb_insn, addr); tlb_hit) {
+      nacc_check_hit(tlb_insn, addr, sizeof(insn_parcel_t), FETCH);
       return from_le(*(insn_parcel_t*)host_addr);
+    }
 
     return from_le(fetch_slow_path(addr));
   }

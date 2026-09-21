@@ -1050,6 +1050,14 @@ bool masked_csr_t::unlogged_write(const reg_t val) noexcept {
   return basic_csr_t::unlogged_write((read() & ~mask) | (val & mask));
 }
 
+bool nacc_layout_csr_t::unlogged_write(reg_t val) noexcept {
+  const auto previous = read();
+  const auto result = masked_csr_t::unlogged_write(val);
+  if (read() != previous)
+    proc->get_mmu()->flush_tlb("layout");
+  return result;
+}
+
 nacc_a_csr_t::nacc_a_csr_t(processor_t* const proc, const reg_t addr, csr_t_p backing):
   csr_t(proc, addr), backing(backing) {
 }

@@ -58,6 +58,7 @@ riscv_srcs = \
 	interactive.cc \
 	cachesim.cc \
 	mmu.cc \
+	nacc_mmu.cc \
 	extension.cc \
 	extensions.cc \
 	rocc.cc \

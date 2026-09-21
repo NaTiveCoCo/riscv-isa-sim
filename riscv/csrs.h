@@ -503,6 +503,13 @@ class masked_csr_t: public basic_csr_t {
   const reg_t mask;
 };
 
+class nacc_layout_csr_t final: public masked_csr_t {
+ public:
+  using masked_csr_t::masked_csr_t;
+ protected:
+  bool unlogged_write(reg_t val) noexcept override;
+};
+
 // NACC A-side CSR 使用普通 backing storage 承接硬件 trap 更新，再通过独立的
 // architectural view 执行软件访问权限与字段掩码。
 class nacc_a_csr_t: public csr_t {

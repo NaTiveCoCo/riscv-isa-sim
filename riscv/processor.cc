@@ -345,7 +345,14 @@ reg_t processor_t::legalize_privilege(reg_t prv)
 
 void processor_t::set_privilege(reg_t prv, bool virt)
 {
-  mmu->flush_tlb();
+  const auto next_prv = legalize_privilege(prv);
+  const auto next_v = virt && next_prv != PRV_M;
+  if (state.prv != next_prv || state.v != next_v || next_prv == PRV_M)
+    mmu->flush_tlb("privilege");
+  else {
+    mmu->nacc_trace("icache-flush", "world");
+    mmu->flush_icache();
+  }
   state.prev_prv = state.prv;
   state.prev_v = state.v;
   state.prv = legalize_privilege(prv);
