@@ -414,7 +414,8 @@ tlb_entry_t mmu_t::refill_tlb(reg_t vaddr, reg_t paddr, char* host_addr, access_
   reg_t expected_tag = vaddr >> PGSHIFT;
   reg_t base_paddr = paddr & ~reg_t(PGSIZE - 1);
 
-  tlb_entry_t entry = {uintptr_t(host_addr) - (vaddr % PGSIZE), paddr - (vaddr % PGSIZE), raw_tag, nacc_guarded_page(paddr)};
+  tlb_entry_t entry = {uintptr_t(host_addr) - (vaddr % PGSIZE), paddr - (vaddr % PGSIZE), raw_tag, nacc_guarded_page(paddr),
+    proc && nacc_effective_a(generate_access_info(vaddr, type, {}))};
 
   if (in_mprv()
       || !pmp_homogeneous(base_paddr, PGSIZE)

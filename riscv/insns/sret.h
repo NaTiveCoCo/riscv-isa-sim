@@ -12,8 +12,7 @@ if (enter_as) {
   require(get_field(STATE.sstatus->read(), MSTATUS_SPP) == PRV_S);
   require(get_field(STATE.satp->read(), SATP64_MODE) == SATP_MODE_SV39);
   require((STATE.astvec->read() & ~reg_t(3)) != 0);
-  // An untrusted S context must not carry stale translations into AS.
-  MMU.flush_tlb("as-entry");
+  // Translation hits require matching A provenance; world entry needs no fence.
 }
 reg_t next_pc = enter_as ? STATE.astvec->read() & ~reg_t(3) : STATE.sepc->read();
 set_pc_and_serialize(next_pc);

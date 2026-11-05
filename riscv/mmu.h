@@ -51,6 +51,7 @@ struct tlb_entry_t {
   reg_t target_addr;
   uint8_t nacc_raw_tag;
   bool nacc_guarded;
+  bool nacc_a;
 };
 
 struct dtlb_entry_t {
@@ -402,6 +403,11 @@ public:
     auto vpn = vaddr / PGSIZE, pgoff = vaddr % PGSIZE;
     auto& entry = tlb[vpn % TLB_ENTRIES];
     auto hit = likely((entry.tag & (~allowed_flags | required_flags)) == (vpn | required_flags));
+    // Check provenance for every hit, including explicit MPRV data accesses.
+    if (proc) {
+      const auto type = tlb == tlb_insn ? FETCH : tlb == tlb_store ? STORE : LOAD;
+      hit = hit && entry.data.nacc_a == nacc_effective_a(generate_access_info(vaddr, type, {}));
+    }
     bool mmio = allowed_flags & TLB_MMIO & entry.tag;
     auto host_addr = mmio ? 0 : entry.data.host_addr + pgoff;
     auto paddr = entry.data.target_addr + pgoff;
