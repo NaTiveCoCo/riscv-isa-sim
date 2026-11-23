@@ -77,6 +77,14 @@ void state_t::csr_init(processor_t* const proc, reg_t max_isa)
   add_csr(CSR_ASIP, asip);
   add_csr(CSR_ASIE, std::make_shared<nacc_asie_csr_t>(proc, CSR_ASIE, asie));
 
+  // Reuse A-side permissions and masked storage; grant writes do not flush TLBs.
+  asgrantbase = std::make_shared<basic_csr_t>(proc, CSR_ASGRANTBASE, 0);
+  asgrantend = std::make_shared<basic_csr_t>(proc, CSR_ASGRANTEND, 0);
+  asgrantcfg = std::make_shared<masked_csr_t>(proc, CSR_ASGRANTCFG, NACC_ASGRANTCFG_MASK, 0);
+  add_csr(CSR_ASGRANTBASE, std::make_shared<nacc_a_csr_t>(proc, CSR_ASGRANTBASE, asgrantbase));
+  add_csr(CSR_ASGRANTEND, std::make_shared<nacc_a_csr_t>(proc, CSR_ASGRANTEND, asgrantend));
+  add_csr(CSR_ASGRANTCFG, std::make_shared<nacc_a_csr_t>(proc, CSR_ASGRANTCFG, asgrantcfg));
+
   const reg_t nacc_page_address_mask = ~reg_t(0xfff);
   add_csr(CSR_SAGENT,
           sagent = std::make_shared<nacc_layout_csr_t>(proc, CSR_SAGENT, nacc_page_address_mask, 0));

@@ -92,6 +92,7 @@ private:
   reg_t get_pmlen(bool effective_virt, reg_t effective_priv, xlate_flags_t flags) const;
   mem_access_info_t generate_access_info(reg_t addr, access_type type, xlate_flags_t xlate_flags);
   bool nacc_bitmap_configured() const;
+  bool nacc_io_grant_allows(reg_t addr, reg_t len, access_type type, reg_t priv, bool agent_mode) const;
   bool nacc_effective_a(const mem_access_info_t& access_info) const;
   uint8_t nacc_bitmap_tag(reg_t paddr, const mem_access_info_t& access_info);
   uint8_t nacc_check_access(const mem_access_info_t& access_info, reg_t paddr, reg_t len, const uint8_t* cached_tag = nullptr);

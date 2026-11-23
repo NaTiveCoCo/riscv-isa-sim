@@ -417,7 +417,11 @@ tlb_entry_t mmu_t::refill_tlb(reg_t vaddr, reg_t paddr, char* host_addr, access_
   tlb_entry_t entry = {uintptr_t(host_addr) - (vaddr % PGSIZE), paddr - (vaddr % PGSIZE), raw_tag, nacc_guarded_page(paddr),
     proc && nacc_effective_a(generate_access_info(vaddr, type, {}))};
 
-  if (in_mprv()
+  // A byte grant never authorizes a whole software-TLB page. Force each ordinary
+  // S access through translation and the live grant check, even without SFENCE.
+  const bool grant_only = proc && raw_tag == 2 && type != FETCH && !entry.nacc_a &&
+    generate_access_info(vaddr, type, {}).effective_priv == PRV_S;
+  if (grant_only || in_mprv()
       || !pmp_homogeneous(base_paddr, PGSIZE)
       || (proc && proc->get_log_commits_enabled()))
     return entry;

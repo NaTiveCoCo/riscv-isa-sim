@@ -125,6 +125,9 @@ struct state_t
   csr_t_p asscratch;
   csr_t_p asip;
   csr_t_p asie;
+  csr_t_p asgrantbase;
+  csr_t_p asgrantend;
+  csr_t_p asgrantcfg;
   csr_t_p aedeleg;
   csr_t_p aideleg;
   csr_t_p sagent;

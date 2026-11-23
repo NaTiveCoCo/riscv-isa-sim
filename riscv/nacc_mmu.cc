@@ -97,6 +97,24 @@ uint8_t mmu_t::nacc_bitmap_tag(reg_t paddr, const mem_access_info_t& access_info
   return (byte >> ((page_index & 3) * 2)) & 3;
 }
 
+bool mmu_t::nacc_io_grant_allows(reg_t addr, reg_t len, access_type type,
+                               reg_t priv, bool agent_mode) const
+{
+  if ((type != LOAD && type != STORE) || priv != PRV_S || agent_mode)
+    return false;
+  const reg_t cfg = proc->state.asgrantcfg->read();
+  const reg_t satp = proc->state.satp->read();
+  const reg_t base = proc->state.asgrantbase->read();
+  const reg_t end = proc->state.asgrantend->read();
+  const reg_t user_end = reg_t(1) << 38;
+  return (cfg & 1) && (proc->state.mstatus->read() & MSTATUS_SUM) &&
+         get_field(satp, SATP64_MODE) == SATP_MODE_SV39 &&
+         get_field(satp, SATP64_PPN) == ((cfg >> 4) & SATP64_PPN) &&
+         base < end && end <= user_end && addr < user_end && len > 0 &&
+         len <= end && addr >= base && addr <= end - len &&
+         (cfg & (type == LOAD ? 2 : 4));
+}
+
 uint8_t mmu_t::nacc_check_access(const mem_access_info_t& access_info, reg_t paddr, reg_t len, const uint8_t* cached_tag)
 {
   const reg_t mode = access_info.effective_priv;
@@ -164,7 +182,10 @@ uint8_t mmu_t::nacc_check_access(const mem_access_info_t& access_info, reg_t pad
       break;
     }
     case 2: // PRIVATE_DATA
-      allowed = mode == PRV_M || effective_a;
+      allowed = mode == PRV_M || effective_a ||
+                nacc_io_grant_allows(access_info.vaddr - access_info.nacc_span_offset,
+                                     access_info.nacc_span_len ? access_info.nacc_span_len : len,
+                                     access_info.type, mode, effective_a);
       break;
     case 3: // PRIVATE_COPY_PENDING
       allowed = mode == PRV_M ||

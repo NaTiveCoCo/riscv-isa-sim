@@ -56,6 +56,7 @@ reg_t as = STATE.asstatus->read();
 STATE.nacc_a = get_field(as, NACC_ASSTATUS_SPA);
 as = set_field(as, NACC_ASSTATUS_SPA, 0);
 if (enter_as) {
+  STATE.asgrantcfg->write(0);
   // Record the actual S origin; leave the saved AU EPC/cause/tval alone.
   as &= ~(NACC_ASSTATUS_ASPA | NACC_ASSTATUS_ASPP |
           NACC_ASSTATUS_ASPIE | NACC_ASSTATUS_ASIE);
